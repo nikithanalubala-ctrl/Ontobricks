@@ -753,15 +753,25 @@ class LakebaseGraphProvisioner:
         """Resolve each app's ``service_principal_client_id``.
 
         Missing apps are skipped with a warning (mirrors the bash ``SKIP``
-        path). Returns an ordered ``{app_name: sp_client_id}`` mapping.
+        path). Returns an ordered ``{app_name: sp_client_id}`` mapping —
+        possibly empty when no app is deployed yet (e.g. local-only dev
+        before the first ``databricks bundle deploy``). The instance,
+        database, and schema were already created by the earlier steps and
+        are usable by the connecting identity (``PGUSER``); the grant steps
+        below are no-ops on an empty mapping, so provisioning still
+        completes and persists the coordinates. Re-run this wizard (or
+        ``make bootstrap-perms``) after deploying to grant the app's
+        service principal access.
         """
+        if not self._app_names:
+            self._warnings.append(
+                "No Databricks App configured (ONTOBRICKS_APP_NAME unset) — "
+                "skipping service-principal grants. Deploy the app, then "
+                "re-run this wizard or `make bootstrap-perms` to grant it access."
+            )
+            return {}
         out, warnings = resolve_app_service_principals(api, self._app_names)
         self._warnings.extend(warnings)
-        if not out:
-            raise ProvisionError(
-                "Could not resolve any app service principal; nothing to grant. "
-                "Check the app names."
-            )
         return out
 
     # ------------------------------------------------------------------
@@ -780,8 +790,10 @@ class LakebaseGraphProvisioner:
                 "PGUSER is not set — required to connect to the new Lakebase "
                 "instance as the app service principal"
             )
-        if not self._app_names:
-            raise ProvisionError("At least one app name is required for grants")
+        # ``self._app_names`` may legitimately be empty (no Databricks App
+        # deployed yet, e.g. local-only dev) — grants are then skipped with a
+        # warning rather than blocking instance/database/schema creation;
+        # see ``_resolve_service_principals``.
 
     def _api(self) -> Any:
         from databricks.sdk import WorkspaceClient

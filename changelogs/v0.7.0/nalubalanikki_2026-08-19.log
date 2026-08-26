@@ -1,0 +1,48 @@
+# Lakebase graph DB provisioning — don't hard-fail when no app is deployed yet
+
+## Context
+
+Debugging session started from a report that "Auto-Map isn't working" on the
+Mapping page. That turned out to be user error (the edit lock had expired
+from inactivity — clicking "Resume editing" fixed it) and a separate,
+unrelated Knowledge Graph triplestore-sync failure (bad `lakebase_branch`
+config, not a code bug). While chasing the KG sync failure, the user then
+hit a real bug: the Settings → "Create graph DB" (Lakebase provisioning)
+wizard aborted outright with "Could not resolve any app service principal;
+nothing to grant. Check the app names." — even though no Databricks App has
+been deployed yet (local-only dev, `ONTOBRICKS_APP_NAME` unset). The wizard
+had already created the Lakebase instance/database/schema before failing,
+but since the whole task raised, `on_success` never ran and the new graph DB
+coordinates were never persisted into `graph_engine_config` — so the graph
+DB was unusable even though it existed.
+
+## Changes
+
+1. `src/back/core/graphdb/lakebase/provisioner.py` —
+   `LakebaseGraphProvisioner._resolve_service_principals` no longer raises
+   `ProvisionError` when zero app service principals resolve (no app
+   deployed, or the configured app name doesn't exist yet). It now appends a
+   warning and returns an empty mapping instead, consistent with how every
+   other grant step in this module (and in `back/core/databricks/lakebase/grants.py`)
+   already treats missing apps as best-effort/skippable rather than fatal.
+   The downstream grant steps (`_step_grant_can_use`, `_step_grant_schema`)
+   already no-op cleanly on an empty `sp_ids` dict, so the task now completes
+   successfully and persists the instance/database/schema coordinates.
+2. `src/back/core/graphdb/lakebase/provisioner.py` —
+   `LakebaseGraphProvisioner._validate_inputs` no longer requires
+   `app_names` to be non-empty up front, for the same reason.
+
+## Modified files
+
+- `src/back/core/graphdb/lakebase/provisioner.py`
+
+## Test result
+
+- `uv run --frozen pytest -q tests/units/settings/test_lakebase_provision.py` — 12 passed.
+- `uv run --frozen pytest -q -m "not scenario"` — 4688 passed, 347 skipped, 1 xfailed,
+  14 failed, 14 errors. All 14 failures/errors are pre-existing and unrelated
+  (Windows `cp1252` `UnicodeDecodeError` reading `app.yaml` in
+  `test_app_yaml_template.py`, `test_deploy_app_rename_guard.py`,
+  `test_deploy_instance_id.py`, `test_middleware_session.py`) — confirmed by
+  re-running the same subset on `master` via `git stash`, which reproduces
+  the identical failure set without this change.
